@@ -17,7 +17,7 @@ Individual operations are designed to be idempotant and can be run in any order.
 The script will check the state of the database and only run the operations that are necessary to bring the database up to date.
 
 .. |RTD| replace:: **Read the docs »**
-.. _RTD: https://sphinx-readme.readthedocs.io/en/latest/
+.. _RTD: https://yet-another-omop-loader.readthedocs.io/en/latest/
 
 |RTD|_
 
