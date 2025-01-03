@@ -21,6 +21,8 @@ DB_CONN_STR = os.environ.get('YAOL_DB_CONN_STR','postgresql://omop:omop@localhos
 #DB_CONN_STR = os.environ.get('YAOL_DB_CONN_STR','postgresql://omop@/omop54')
 #: Name of the Schema to use for the CDM data tables.  Set from the YAOL_DB_OMOP_SCHEMA env var.
 DB_OMOP_SCHEMA = os.environ.get('YAOL_DB_OMOP_SCHEMA','cdm')
+#: Name of the Schema to use for the vocab tables.  Set from the YAOL_DB_VOCAB_SCHEMA env var. Defaults to DB_OMOP_SCHEMA
+DB_VOCAB_SCHEMA = os.environ.get('YAOL_DB_VOCAB_SCHEMA',DB_OMOP_SCHEMA)
 #: Name of the Schema to use for the Achilles results tables. Set from the YAOL_DB_RESULTS_SCHEMA env var.
 DB_RESULTS_SCHEMA = os.environ.get('YAOL_DB_RESULTS_SCHEMA','results')
 #: Path to a zip file containg OMOP vocabulary files as downlaoded from Athena. Set from the YAOL_VOCAB_ZIP env var.

@@ -14,10 +14,17 @@ Introduction
 ------------
 
 Yet Another OMOP Loader is a tool designed to load data into an OMOP Common Data Model Postgres database. 
-It includes functionality to check the state of the database and handle various command line arguments to support pipeline operations.
 
-Individual operations are designed to be idempotant and can be run in any order. 
-The script will check the state of the database and only run the operations that are necessary to bring the database up to date.
+The tool is designed to be run at multiple stages of a pipeline, with the following stages.
+    #. Create the database schemas and tables
+    #. Load the vocabularies
+    #. Load the data
+    #. Create the primary keys
+    #. Create the indicies
+    #. Create the foreign keys
+
+Each stage is idempotent so can be re-run to ensure a database is in a known state, the tool will not attempt to recreate objects that already exist or load data into tables which already contain data.
+Seperate schemas can be specified for data and vocabularies so a single database can hold multiple OMOP datasets which share commmon vocabularies.
 
 To configure your environment ready to use the tool:
     #. Create an empty database and a user with admin access. Set the database name and user name into :py:data:`config.DB_CONN_STR`
@@ -27,8 +34,6 @@ To configure your environment ready to use the tool:
     #. Set :py:data:`config.DAT_PATH` to point to your CSV files.
     #. Download a vocab zip file from Athena and set :py:data:`config.VOCABS_ZIP` to the path of the zip file.
     #. Set other environment variables as required.
-
-
 
 Installation
 ------------
@@ -68,14 +73,19 @@ Configuration Settings
 .. autodata:: config.DB_OMOP_SCHEMA
    :no-value:
    
+.. autodata:: config.DB_VOCAB_SCHEMA
+   :no-value:
+   
 .. autodata:: config.DB_RESULTS_SCHEMA
    :no-value:
    
 .. autodata:: config.VOCABS_ZIP
    :no-value:
 
-Script Functions
-----------------
+Functions
+---------
 .. automodule:: omoploader
    :members:
 
+.. automodule:: dbutils
+   :members:

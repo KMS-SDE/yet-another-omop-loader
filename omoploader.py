@@ -11,10 +11,11 @@ import psycopg
 import dotenv
 
 import config
+import dbutils
 
 logger = logging.getLogger(__name__)
 
-def add_schema(ddl_file:str,schema_name:str)->str:
+def add_schema(ddl_file:str,schema_name:str,vocab_schema_name:str)->str:
     '''
     Reads an OMOP DDL file as downloaded from the OHDSI github and replaces the schema template variable
      with the specified schema.
@@ -23,6 +24,8 @@ def add_schema(ddl_file:str,schema_name:str)->str:
     :type ddl_file: str
     :param schema_name: The schema name to replace the @cdmDatabaseSchema placeholder with.
     :type schema_name: str
+    :param vocab_schema_name: The schema name to replace the @cdmDatabaseSchema placeholder with for vocab tablees
+    :type vocab_schema_name: str
 
     :returns: A string containing the contents of the ddl file with the specifed schema set.
     :rtype: str
@@ -30,11 +33,17 @@ def add_schema(ddl_file:str,schema_name:str)->str:
     logger.debug("Adding Schema %s to DDL file %s" % (schema_name,ddl_file))
     with open(ddl_file) as f:
         ddl = f.read()
-        ddl = ddl.replace('@cdmDatabaseSchema',schema_name)
+        table_creates = re.findall('CREATE TABLE ([^\s]+)',ddl)
+        for create_statement in table_creates:
+            table_name = create_statement.split('.')[1]
+            if dbutils.is_vocab_table(table_name):
+                 ddl = ddl.replace(create_statement,'%s.%s' % (vocab_schema_name,table_name))
+            else:
+                ddl = ddl.replace(create_statement,'%s.%s' % (schema_name,table_name))
         ddl = ddl.replace('CREATE TABLE ','CREATE TABLE IF NOT EXISTS ')
     return ddl
 
-def run_sql_template(conn:psycopg.connection,schema_name:str,template_file:str)->None:
+def run_sql_template(conn:psycopg.connection,schema_name:str,vocab_schema_name:str,template_file:str)->None:
     """
     Executes a file of SQL statements as downloaded from the OHDSI github. The contents
     of the file are first passed to the add_schema function to replace the schema placeholder.
@@ -43,6 +52,8 @@ def run_sql_template(conn:psycopg.connection,schema_name:str,template_file:str)-
     :type conn: psycopg.connection
     :param schema_name: The schema name to run the statements against.
     :type schema_name: str
+    :param vocab_schema_name: The schema name to run the statements against for vocab tables.
+    :type vocab_schema_name: str
     :param template_file: The file of sql statements to run.
     :type temple_file: str
 
@@ -50,12 +61,12 @@ def run_sql_template(conn:psycopg.connection,schema_name:str,template_file:str)-
     :rtype: None
     """
     logger.debug("Running sql file %s on database %s schema %s" % (template_file,conn,schema_name))
-    sql_queries = add_schema(template_file,schema_name)
+    sql_queries = add_schema(template_file,schema_name,vocab_schema_name)
     with conn.cursor() as cur:
         cur.execute(sql_queries)
     return None
 
-def drop_cdm(conn:psycopg.connection,schema_name:str,results_schema_name:str)->None:
+def drop_cdm(conn:psycopg.connection,schema_name:str,vocab_schema_name:str,results_schema_name:str)->None:
     """
     Drops the specifed schemas from the database. Does nothing if they calready exist.
 
@@ -63,20 +74,29 @@ def drop_cdm(conn:psycopg.connection,schema_name:str,results_schema_name:str)->N
     :type conn: psycopg.connection
     :param schema_name: The name of the CDM schema to remove.
     :type schema_name: str
+    :param vocab_schema_name: The name of the vocab schema to remove.
+    :type vocab_schema_name: str
     :param results_schema_name: The name of the results schema to remove.
     :type results_schema_name: str
 
     :returns: None
     :rtype: None
     """
-    if schema_exists(conn,schema_name):
+    if dbutils.schema_exists(conn,schema_name):
         logger.debug("Dropping schema %s" % schema_name)
         with conn.cursor() as cur:
             cur.execute('DROP SCHEMA %s CASCADE' % (schema_name,))
         conn.commit()
     else:
         logger.debug("Schema %s does not exist. Not dropping" % (schema_name,))
-    if schema_exists(conn,results_schema_name):
+    if dbutils.schema_exists(conn,vocab_schema_name):
+        logger.debug("Dropping schema %s" % (vocab_schema_name,))
+        with conn.cursor() as cur:
+            cur.execute('DROP SCHEMA %s CASCADE' % (vocab_schema_name,))
+        conn.commit()
+    else:
+        logger.debug("Schema %s does not exist. Not dropping" % (vocab_schema_name,))
+    if dbutils.schema_exists(conn,results_schema_name):
         logger.debug("Dropping schema %s" % (results_schema_name,))
         with conn.cursor() as cur:
             cur.execute('DROP SCHEMA %s CASCADE' % (results_schema_name,))
@@ -85,7 +105,7 @@ def drop_cdm(conn:psycopg.connection,schema_name:str,results_schema_name:str)->N
         logger.debug("Schema %s does not exist. Not dropping" % (results_schema_name,))
     return None
 
-def build_cdm(conn:psycopg.connection,schema_name:str,ddl_file:str,results_schema_name:str)->None:
+def build_cdm(conn:psycopg.connection,schema_name:str,vocab_schema_name:str,ddl_file:str,results_schema_name:str)->None:
     """
     Build the OMOP CDM Tables by executing the OMOP DDL file. 
     Does nothing if the already exist (by replacing the CREATE TABLE statements with CREATE TABLE IF NOT EXISTS statements)
@@ -94,30 +114,40 @@ def build_cdm(conn:psycopg.connection,schema_name:str,ddl_file:str,results_schem
     :type conn: psycopg.connection
     :param schema_name: The name of the CDM schema to create and build the tables in. This replaces the schema template variable in the DDL file.
     :type schema_name: str
+    :param vocab_schema_name: The name of the CDM schema to create and build the tables in. This replaces the schema template variable in the DDL file for vocab tables.
+    :type vocab_schema_name: str
     :param results_schema_name: The name of the results schema to create and build the results the tables in (not currently used)
     :type results_schema_name: str
 
     :returns: None
     :rtype: None
     """
-    if not schema_exists(conn,schema_name):
+    if not dbutils.schema_exists(conn,schema_name):
         logger.debug("Creating schema %s" % schema_name)
         with conn.cursor() as cur:
             cur.execute('CREATE SCHEMA %s' % (schema_name,))
         conn.commit()
     else:
         logger.debug("Schema %s exists. Not creating" % schema_name)
-    if not schema_exists(conn,results_schema_name):
+    if not dbutils.schema_exists(conn,vocab_schema_name):
+        logger.debug("Creating schema %s" % vocab_schema_name)
+        with conn.cursor() as cur:
+            cur.execute('CREATE SCHEMA %s' % (vocab_schema_name,))
+        conn.commit()
+    else:
+        logger.debug("Schema %s exists. Not creating" % schema_name)
+    if not dbutils.schema_exists(conn,results_schema_name):
         logger.debug("Creating schema %s" % results_schema_name)
         with conn.cursor() as cur:
             cur.execute('CREATE SCHEMA %s' % (results_schema_name,))
         conn.commit()
     else:
         logger.debug("Schema %s exists. Not creating" % results_schema_name)
-    run_sql_template(conn,schema_name,ddl_file)
+    #TODO Change this to go table by table getting the correct schema as we go.
+    run_sql_template(conn,schema_name,vocab_schema_name,ddl_file)
     return None
 
-def build_indicies(conn:psycopg.connection,schema_name:str,indices_file:str)->None:
+def build_indicies(conn:psycopg.connection,schema_name:str,vocab_schema_name:str,indices_file:str)->None:
     """
     Build the OMOP CDM Indexes by executing the OMOP Indexes file. Does nothing if they already exist.
 
@@ -125,6 +155,8 @@ def build_indicies(conn:psycopg.connection,schema_name:str,indices_file:str)->No
     :type conn: psycopg.connection
     :param schema_name: The name of the CDM schema. This replaces the schema template varaible in the sql file.
     :type schema_name: str
+    :param vocab_schema_name: The name of the CDM schema. This replaces the schema template varaible in the sql file for vocab tables.
+    :type vocab_schema_name: str
     :param indices_file: The name of the file containing the SQL statements to create the indexes.
     :type indices_file: str
 
@@ -136,16 +168,20 @@ def build_indicies(conn:psycopg.connection,schema_name:str,indices_file:str)->No
     with open(indices_file) as f:
             for line in f:
                 sql = None
-                index_name = re.match('CREATE INDEX (.+) ON',line)
+                index_name = re.match('CREATE INDEX (.+) ON ([^\s]+)',line)
                 if index_name is None:
                     continue
+                table_name = index_name.group(2)
                 index_name = index_name.group(1)
                 logger.debug("Got index_name %s" % index_name)
                 if not index_name is None:
                     sql = line
                     with conn.cursor() as cur:
-                        if not index_exists(conn,index_name):
-                            sql = sql.replace('@cdmDatabaseSchema',schema_name)
+                        if not dbutils.index_exists(conn,index_name):
+                            if dbutils.is_vocab_table(table_name):
+                                sql = sql.replace('@cdmDatabaseSchema',vocab_schema_name)
+                            else:
+                                sql = sql.replace('@cdmDatabaseSchema',schema_name)
                             index_name = sql.split()[2]
                             cur.execute(sql)
                             created_index = index_name
@@ -166,7 +202,7 @@ def build_indicies(conn:psycopg.connection,schema_name:str,indices_file:str)->No
                 logger.debug("Skipping %s" % sql)
     return None
 
-def build_pkeys(conn:psycopg.connection,schema_name:str,pkeys_file:str)->None:
+def build_pkeys(conn:psycopg.connection,schema_name:str,vocab_schema_name:str,pkeys_file:str)->None:
     """
     Build the OMOP CDM Primary Keys by executing the OMOP Primary Keys file. Does nothing if they already exist.
 
@@ -174,6 +210,8 @@ def build_pkeys(conn:psycopg.connection,schema_name:str,pkeys_file:str)->None:
     :type conn: psycopg.connection
     :param schema_name: The name of the CDM schema. This replaces the schema template varaible in the sql file.
     :type schema_name: str
+    :param vocab_schema_name: The name of the CDM schema. This replaces the schema template varaible in the sql file for vocab tables.
+    :type vocab_schema_name: str
     :param pkeys_file: The name of the file containing the SQL statements to create the Keys.
     :type pkeys_file: str
 
@@ -183,20 +221,27 @@ def build_pkeys(conn:psycopg.connection,schema_name:str,pkeys_file:str)->None:
     with open(pkeys_file) as f:
         for line in f:
             with conn.cursor() as cur:
-                sql = line.replace('@cdmDatabaseSchema',schema_name).strip()
-                key_name = re.search('ADD CONSTRAINT (.+) PRIMARY KEY',line)
+                key_name = re.search('ALTER TABLE (.+) ADD CONSTRAINT (.+) PRIMARY KEY',line)
                 if key_name is None:
                     continue
-                key_name = key_name.group(1)
+                table_name = key_name.group(1)
+                key_name = key_name.group(2)
                 logger.debug("Got key name %s" % key_name)
-                if not key_exists(conn,key_name):
+                logger.debug("Got table name %s" % table_name)
+                if dbutils.is_vocab_table(table_name):
+                    logger.debug("Making key in vocab schema %s" % vocab_schema_name)
+                    sql = line.replace('@cdmDatabaseSchema',vocab_schema_name).strip()
+                else:
+                    logger.debug("Making key in cdm schema %s" % schema_name)
+                    sql = line.replace('@cdmDatabaseSchema',schema_name).strip()
+                if not dbutils.key_exists(conn,key_name):
                     cur.execute(sql)
                     logger.debug("Added key %s" % sql)
                 else:
                     logger.debug("Skipped key %s" % sql)
     return None
 
-def build_fkeys(conn:psycopg.connection,schema_name:str,constraints_file:str)->None:
+def build_fkeys(conn:psycopg.connection,schema_name:str,vocab_schema_name:str,constraints_file:str)->None:
     """
     Build the OMOP CDM foreign keys by executing the OMOP Constrains file. Does nothing if they already exist.
 
@@ -204,6 +249,8 @@ def build_fkeys(conn:psycopg.connection,schema_name:str,constraints_file:str)->N
     :type conn: psycopg.connection
     :param schema_name: The name of the CDM schema. This replaces the schema template varaible in the sql file.
     :type schema_name: str
+    :param vocab_schema_name: The name of the CDM schema. This replaces the schema template varaible in the sql file for vocab tables.
+    :type vocab_schema_name: str
     :param constraints_file: The name of the file containing the SQL statements to create the foreign keys.
     :type constraints_file: str
 
@@ -213,20 +260,34 @@ def build_fkeys(conn:psycopg.connection,schema_name:str,constraints_file:str)->N
     with open(constraints_file) as f:
         for line in f:
             with conn.cursor() as cur:
-                sql = line.replace('@cdmDatabaseSchema',schema_name).strip()
-                key_name = re.search('ADD CONSTRAINT (.+) FOREIGN KEY',line)
+                key_name = re.search('ALTER TABLE (.+) ADD CONSTRAINT (.+) FOREIGN KEY .+ REFERENCES ([^\s]+)',line)
                 if key_name is None:
                     continue
-                key_name = key_name.group(1)
+                logger.debug("Got SQL line %s" % line)
+                table_name = key_name.group(1)
+                reference_table_name = key_name.group(3)
+                key_name = key_name.group(2)
                 logger.debug("Got foreign key name %s" % key_name)
-                if not key_exists(conn,key_name):
+                logger.debug("Got table name %s" % table_name)
+                logger.debug("Got reference table name %s" % reference_table_name)
+                if dbutils.is_vocab_table(table_name):
+                    logger.debug("Making foreign key in vocab schema %s" % vocab_schema_name)
+                    sql = line.replace(table_name,"%s.%s" % (vocab_schema_name,table_name.split('.')[1])).strip()
+                else:
+                    logger.debug("Making foreign key in cdm schema %s" % schema_name)
+                    sql = line.replace(table_name,"%s.%s" % (schema_name,table_name.split('.')[1])).strip()
+                if dbutils.is_vocab_table(reference_table_name):
+                    logger.debug("Referencing table in vocab schema %s" % reference_table_name)
+                    sql = sql.replace(reference_table_name,"%s.%s" % (vocab_schema_name,reference_table_name.split('.')[1])).strip()
+                else:
+                    logger.debug("Referencing table in cdm schema %s" % reference_table_name)
+                    sql = sql.replace(reference_table_name,"%s.%s" % (schema_name,reference_table_name.split('.')[1])).strip()
+                if not dbutils.key_exists(conn,key_name):
                     cur.execute(sql)
                     logger.debug("Added foreign key %s" % sql)
                 else:
                     logger.debug("Skipped foreign key %s" % sql)
     return None
-
-    #run_sql_template(conn,schema_name,constraints_file)
 
 def build_table_map(data_pattern:str,data_path:str)->list[tuple[str,str]]: 
     """
@@ -258,7 +319,7 @@ def load_vocabs_from_zip(conn:psycopg.connection,db_schema:str,zip_file:str)->No
 
     :param conn: A psycopg connection object to the postgres database
     :type conn: psycopg.connection
-    :param schema_name: The name of the CDM schema. This replaces the schema template varaible in the sql file.
+    :param schema_name: The name of the CDM schema. This replaces the schema template variable in the sql file for the vocab tables.
     :type schema_name: str
     :param zip_file: The path to the zip file containing vocab files.
     :type zip_file: str
@@ -275,7 +336,7 @@ def load_vocabs_from_zip(conn:psycopg.connection,db_schema:str,zip_file:str)->No
             with archive.open(vocab_file) as f:
                 logger.debug("Checking %s" % vocab_file)
                 table_name = vocab_file.replace(".csv","")
-                if table_is_empty(conn,db_schema,table_name):
+                if dbutils.table_is_empty(conn,db_schema,table_name):
                     logger.debug("Loading %s" % table_name)
                     query = "COPY %s.%s FROM STDIN WITH(FORMAT CSV, HEADER, DELIMITER E'\\t', QUOTE E'\\b')" % (db_schema,table_name,)
                     logger.debug(query)
@@ -309,7 +370,7 @@ def load_data_csv(conn:psycopg.connection,db_schema:str,table_map:tuple[str,str]
         with open(csv_file) as f:
                 headers = f.readline().strip()
         logger.debug("Got CSV headers:%s" % headers)
-        if table_is_empty(conn,db_schema,table_name) or delete_first:                
+        if dbutils.table_is_empty(conn,db_schema,table_name) or delete_first:                
             logger.debug("Loading table %s" % table_name)
             with conn.cursor() as cur:
                 if delete_first:
@@ -326,95 +387,6 @@ def load_data_csv(conn:psycopg.connection,db_schema:str,table_map:tuple[str,str]
                     cur.execute("ALTER TABLE %s.%s ENABLE TRIGGER ALL" % (db_schema,table_name))
         else:
             logger.debug("Table %s not empty. Skipping" % (table_name,))
-    return None
-
-def schema_exists(conn:psycopg.connection,schema_name:str)->bool:
-    """
-    Checks whether the given schema exists.
-
-    :param conn: A psycopg connection object to the postgres database
-    :type conn: psycopg.connection
-    :param schema_name: The name of the schema to check.
-    :type schema_name: str
-
-    :returns: True if the schema exists
-    :rtype: bool
-    """
-    logger.debug("Checking for schema %s" % (schema_name,))
-    sql = "SELECT schema_name FROM information_schema.schemata WHERE schema_name='%s'" % (schema_name)
-    with conn.cursor() as cur:
-        res = cur.execute(sql)
-        exists = cur.rowcount>0
-        logger.debug("Schema exists is %s" % exists)
-        return exists
-    return None
-
-def key_exists(conn:psycopg.connection,key_name:str)->bool:
-    """
-    Checks whether the given primary or foreign key exists.
-
-    :param conn: A psycopg connection object to the postgres database
-    :type conn: psycopg.connection
-    :param key_name: The name of the key to check.
-    :type key_name: str
-
-    :returns: True if the key exists
-    :rtype: bool
-    """
-    key_name = key_name.strip()
-    logger.debug("Checking for key %s" % (key_name,))
-    sql = "select constraint_name from information_schema.table_constraints where constraint_name='%s' and (constraint_type='PRIMARY KEY' or constraint_type='FOREIGN KEY')" % key_name
-    with conn.cursor() as cur:
-        res = cur.execute(sql)
-        exists = cur.rowcount>0
-        logger.debug("Key exists is %s" % exists)
-        return exists
-    return None
-
-def index_exists(conn:psycopg.connection,index_name:str)->bool:
-    """
-    Checks whether the given index exists.
-
-    :param conn: A psycopg connection object to the postgres database
-    :type conn: psycopg.connection
-    :param index_name: The name of the index to check.
-    :type index_name: str
-
-    :returns: True if the index exists
-    :rtype: bool
-    """
-    index_name = index_name.strip()
-    logger.debug("Checking for Index %s" % (index_name,))
-    sql = "select indexname from pg_indexes where indexname='%s'" % index_name
-    with conn.cursor() as cur:
-        res = cur.execute(sql)
-        exists = cur.rowcount>0
-        logger.debug("Index exists is %s" % exists)
-        return exists
-    return None
-
-def table_is_empty(conn_str:str,schema_name:str,table_name:str)->bool:
-    """
-    Checks whether the given table is empty.
-
-    :param conn: A psycopg connection object to the postgres database
-    :type conn: psycopg.connection
-    :param schema_name: The name of the CDM schema. This replaces the schema template varaible in the sql file.
-    :type schema_name: str
-    :param table_name: The name of the table to check.
-    :type table_name: str
-
-    :returns: True if the table is empty
-    :rtype: bool
-    """
-    logger.debug("Checking if table %s is empty" % table_name)
-    sql = "SELECT count(*) FROM %s.%s" % (schema_name,table_name)
-    with conn.cursor() as cur:
-        res = cur.execute(sql)
-        count = res.fetchone()[0]
-        empty = (count==0)
-        logger.debug("empty is %s" % empty)
-        return empty
     return None
 
 def get_args_parser()->argparse.ArgumentParser:
@@ -436,6 +408,12 @@ def get_args_parser()->argparse.ArgumentParser:
     parser.add_argument("-sc","--skipcheck", 
                         help='Skips checking the state of the database before running action.',
                         action='store_true'
+                        )
+    parser.add_argument("--omopschema", 
+                        help='OMOP Schema. Overrides config.DB_OMOP_SCHEMA',
+                        )
+    parser.add_argument("--vocabschema", 
+                        help='Vocab Schema. Overrides config.DB_VOCAB_SCHEMA',
                         )
 
     subparsers = parser.add_subparsers(help='Database operation',
@@ -467,6 +445,10 @@ def handle_args()->argparse.Namespace:
     """
     parser = get_args_parser()
     args = parser.parse_args()
+    if not args.omopschema is None:
+        config.DB_OMOP_SCHEMA = args.omopschema
+    if not args.vocabschema is None:
+        config.DB_VOCAB_SCHEMA = args.vocabschema
     return args
 
 def setup_logging(debug:bool)->None:
@@ -494,7 +476,7 @@ def setup_logging(debug:bool)->None:
     
 def clean(conn:psycopg.connection)->None: #action=="clean"
     """
-    Calls :py:func:`drop_cdm` with the values of  :py:data:`config.DB_OMOP_SCHEMA` 
+    Calls :py:func:`drop_cdm` with the values of  :py:data:`config.DB_OMOP_SCHEMA`, :py:data:`config.DB_VOCAB_SCHEMA`
     and :py:data:`config.DB_RESULTS_SCHEMA`
 
     :param conn: A psycopg connection object to the postgres database
@@ -504,7 +486,7 @@ def clean(conn:psycopg.connection)->None: #action=="clean"
     :rtype: None
     """
     logger.info("Dropping schemas",)
-    drop_cdm(conn,config.DB_OMOP_SCHEMA,config.DB_RESULTS_SCHEMA) 
+    drop_cdm(conn,config.DB_OMOP_SCHEMA,config.DB_VOCAB_SCHEMA,config.DB_RESULTS_SCHEMA) 
     return None
 
 def build(conn:psycopg.connection)->None: #action=="cdm"
@@ -519,7 +501,7 @@ def build(conn:psycopg.connection)->None: #action=="cdm"
     :rtype: None
     """
     logger.info("Building cdm")
-    build_cdm(conn,config.DB_OMOP_SCHEMA,config.DDL_FILE,config.DB_RESULTS_SCHEMA)
+    build_cdm(conn,config.DB_OMOP_SCHEMA,config.DB_VOCAB_SCHEMA,config.DDL_FILE,config.DB_RESULTS_SCHEMA)
     return None
 
 def vocabs(conn:psycopg.connection,skip_check:bool=False)->None: #action=="vocabs":
@@ -538,7 +520,7 @@ def vocabs(conn:psycopg.connection,skip_check:bool=False)->None: #action=="vocab
     if not skip_check:
         build(conn) 
     logger.info("Loading vocabs")
-    load_vocabs_from_zip(conn,config.DB_OMOP_SCHEMA,config.VOCABS_ZIP) #action=="vocabs" #TODO Clean vocabs?
+    load_vocabs_from_zip(conn,config.DB_VOCAB_SCHEMA,config.VOCABS_ZIP) #action=="vocabs" #TODO Clean vocabs?
     return None
 
 def load(conn:psycopg.connection,delete_first:bool=False,skip_check:bool=False)->None: #action=="load"
@@ -569,7 +551,7 @@ def load(conn:psycopg.connection,delete_first:bool=False,skip_check:bool=False)-
 def pkeys(conn:psycopg.connection,delete_first=False,skip_check:bool=False)->None:
     """
     Ensures data is loaded by calling :py:func:`load()` then calls :py:func:`build_keys` with the values 
-    :py:data:`config.DB_OMOP_SCHEMA` and  :py:data:`config.KEYS_FILE`.
+    :py:data:`config.DB_OMOP_SCHEMA`, :py:data:`config.DB_VOCAB_SCHEMA`, and :py:data:`config.KEYS_FILE`.
 
     :param conn: A psycopg connection object to the postgres database
     :type conn: psycopg.connection
@@ -584,13 +566,13 @@ def pkeys(conn:psycopg.connection,delete_first=False,skip_check:bool=False)->Non
     if not skip_check:
         load(conn)
     logger.info("Adding primary keys")
-    build_pkeys(conn,config.DB_OMOP_SCHEMA,config.KEYS_FILE)
+    build_pkeys(conn,config.DB_OMOP_SCHEMA,config.DB_VOCAB_SCHEMA,config.KEYS_FILE)
     return None
 
 def index(conn:psycopg.connection,delete_first=False,skip_check:bool=False)->None:
     """
     Ensures keys are created by calling :py:func:`keys()` then calls :py:func:`build_indicies` with the values 
-    :py:data:`config.DB_OMOP_SCHEMA`, :py:data:`config.INDICIES_FILE`.
+    :py:data:`config.DB_OMOP_SCHEMA`, :py:data:`config.DB_VOCAB_SCHEMA`, and :py:data:`config.INDICIES_FILE`.
 
     :param conn: A psycopg connection object to the postgres database
     :type conn: psycopg.connection
@@ -605,13 +587,13 @@ def index(conn:psycopg.connection,delete_first=False,skip_check:bool=False)->Non
     if not skip_check:
         pkeys(conn)
     logger.info("Building indexes")
-    build_indicies(conn,config.DB_OMOP_SCHEMA,config.INDICIES_FILE)
+    build_indicies(conn,config.DB_OMOP_SCHEMA,config.DB_VOCAB_SCHEMA,config.INDICIES_FILE)
     return None
 
 def fkeys(conn:psycopg.connection,delete_first=False,skip_check:bool=False)->None:
     """
     Ensures indexes are created by calling :py:func:`indicies()` then calls :py:func:`build_fkeys` with the values 
-    :py:data:`config.DB_OMOP_SCHEMA`, :py:data:`config.CONSTRAINTS_FILE`.
+    :py:data:`config.DB_OMOP_SCHEMA`, :py:data:`config.DB_VOCAB_SCHEMA`, :py:data:`config.CONSTRAINTS_FILE`.
 
     :param conn: A psycopg connection object to the postgres database
     :type conn: psycopg.connection
@@ -626,12 +608,13 @@ def fkeys(conn:psycopg.connection,delete_first=False,skip_check:bool=False)->Non
     if not skip_check:
         index(conn)
     logger.info("Adding foreign keys")
-    build_fkeys(conn,config.DB_OMOP_SCHEMA,config.CONSTRAINTS_FILE)
+    build_fkeys(conn,config.DB_OMOP_SCHEMA,config.DB_VOCAB_SCHEMA,config.CONSTRAINTS_FILE)
     return None
 
 if __name__=="__main__":
     args = handle_args()
     setup_logging(args.debug)
+    logger.debug("Running with args: %s" % (args,))
     skip_check = args.skipcheck
     with psycopg.connect(config.DB_CONN_STR) as conn:
         if args.action=='clean':
@@ -643,7 +626,7 @@ if __name__=="__main__":
         if args.action=='load' or args.action=='reload' or args.action=='all':
             reload = (args.action=='reload')
             load(conn,reload,skip_check)
-            #TODO We should probably have an option to rebuild keys etc on a reload?
+            #TODO We should probably have an option to rebuild indexes etc on a reload?
         if args.action=='pkeys' or args.action=='all':
             pkeys(conn,False,skip_check)
         if args.action=='index' or args.action=='all':
